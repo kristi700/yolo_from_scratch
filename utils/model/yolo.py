@@ -9,9 +9,9 @@ class YoloModel(nn.Module):
         super().__init__()
         self.input_size = input_size
         self.num_classes = num_classes
-        self.anchors = anchors
-        self.num_boxes = len(anchors)
-        self.num_attributes = 1 + 4 + num_classes # label, x, y, w, h
+        self.anchors = torch.tensor(anchors)
+        self.num_boxes = 5
+        self.num_attributes = 1 + 4 + num_classes # obj, x, y, w, h
 
         # TODO -> 'neck' -> concat 26x26 and 13x13 feature maps
         self.backbone = Darknet19()
@@ -29,7 +29,7 @@ class YoloModel(nn.Module):
         # now -> batch , numbox * numattr, grid, grid
         # want -> batch, numbox, grid, grid, num attr
         x = x.view(batch_size, self.num_boxes, self.num_attributes, grid_size, grid_size)
-        x = x.permute(0, 1, 3, 4, 2).contiguous()
+        x = x.permute(0, 3, 4, 1, 2).contiguous()
 
         # box center points needs sigmoid!
         # objectness needs sigmoid as well
@@ -37,7 +37,7 @@ class YoloModel(nn.Module):
         pred_obj = torch.sigmoid(x[..., [0]])
         pred_box_txty = torch.sigmoid(x[..., 1:3])
         pred_box_twth = x[..., 3:5]
-        pred_cls = x[..., 5:] # NOTE - weird for me how we dont softmax class labels
+        pred_cls = x[..., 5:] # NOTE - weird for me how we dont softmax class labels - could help
         
         return torch.cat((pred_obj, pred_box_txty, pred_box_twth, pred_cls), dim=-1)
         
