@@ -37,7 +37,7 @@ class YoloModel(nn.Module):
         pred_obj = torch.sigmoid(x[..., [0]])
         pred_box_txty = torch.sigmoid(x[..., 1:3])
         pred_box_twth = x[..., 3:5]
-        pred_cls = x[..., 5:] # NOTE - weird for me how we dont softmax class labels - could help
+        pred_cls = x[..., 5:] # TODO - weird for me how we dont softmax class labels - could help
         
         return torch.cat((pred_obj, pred_box_txty, pred_box_twth, pred_cls), dim=-1)
         

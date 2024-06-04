@@ -58,7 +58,7 @@ class YoloLoss():
         cls_loss = cls_loss.sum() / self.batch_size
 
         multipart_loss = self.lambda_obj * obj_loss + noobj_loss + (txty_loss + twth_loss) + cls_loss
-        return [multipart_loss, obj_loss, noobj_loss, txty_loss, twth_loss, cls_loss]
+        return multipart_loss
 
 
 
@@ -117,7 +117,7 @@ class YoloLoss():
             target_y = (item[2] * self.grid_size) - grid_ij[1]
 
             # w,h we need to better the anchor
-            # we will stick to the log calculations for now as in yolov2 paper, but will change it to n*sigmoid later for better stability
+            # TODO we will stick to the log calculations for now as in yolov2 paper, but will change it to n*sigmoid later for better stability
             target_w = torch.log(item[3] / self.anchors[best_iou_id][0])
             target_h = torch.log(item[4] / self.anchors[best_iou_id][1])
 
