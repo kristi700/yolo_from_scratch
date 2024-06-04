@@ -8,6 +8,7 @@ class YoloLoss():
         self.anchors = anchors
         self.num_attributes = 1 + 4 + 1 # obj, xywh, label (no need for onehot as this is only used for loss calc purposes)
         self.iou_threshold = 0.5
+        self.lambda_obj = 4.0
         self.device = device
         self.batch_size = batch_size
         self.obj_loss = nn.MSELoss()
@@ -28,14 +29,14 @@ class YoloLoss():
         pred_obj = predictions[..., 0]
         pred_xy = predictions[..., 1:3]
         pred_wh = predictions[..., 3:5]
-        pred_cls = predictions[..., 5:]
+        pred_cls = predictions[..., 5:].permute(0, 4, 1, 2, 3)
         # Get the same for target (obj + noobj)
 
         target_obj = (targets[..., 0] == 1).float()
         target_noobj = (targets[..., 0] == 0).float()
         target_xy = targets[..., 1:3]
         target_wh = targets[..., 3:5]
-        target_cls = targets[..., 5]
+        target_cls = targets[..., 5].long()
 
         with torch.no_grad():
             iou_pred_with_target = self._calculate_iou(pred_box_cxcywh=predictions[..., 1:5], target_box_cxcywh=targets[..., 1:5])
