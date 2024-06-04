@@ -3,11 +3,13 @@ import torch
 from torch import nn
 
 class YoloLoss():
-    def __init__(self, input_size, anchors, label_smoothing=0.0):
+    def __init__(self, input_size, batch_size, anchors, device, label_smoothing=0.0):
         self.stride = 32
         self.anchors = anchors
         self.num_attributes = 1 + 4 + 1 # obj, xywh, label (no need for onehot as this is only used for loss calc purposes)
-        self.iou_threshold = 0.5 # 
+        self.iou_threshold = 0.5
+        self.device = device
+        self.batch_size = batch_size
         self.obj_loss = nn.MSELoss()
         self.box_loss = nn.MSELoss()
         self.class_loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
@@ -15,23 +17,84 @@ class YoloLoss():
 
     def _set_grid_yx(self, input_size):
         self.grid_size = input_size // self.stride
-        # TODO do the rest when needed
+        grid_y, grid_x = torch.meshgrid((torch.arange(self.grid_size), torch.arange(self.grid_size)), indexing="ij")
+        self.grid_x = grid_x.contiguous().view(1, self.grid_size, self.grid_size, 1)
+        self.grid_y = grid_y.contiguous().view(1, self.grid_size, self.grid_size, 1)
 
-    def __call__(self, predicitions, labels):
-        # build targets -> 
-            # for each batch, and for each box in each cell we need to get the best anchors
-            # Assign the ground truth values (coordinates, objectness score, and class label) to the appropriate positions in the target tensors.
+    def __call__(self, predictions, labels):
+        targets = self._build_targets(labels).to(predictions.device)
 
-        targets = self._build_targets(labels)
+        # Get predobj, predxy, predwh, predcls
+        pred_obj = predictions[..., 0]
+        pred_xy = predictions[..., 1:3]
+        pred_wh = predictions[..., 3:5]
+        pred_cls = predictions[..., 5:]
+        # Get the same for target (obj + noobj)
 
-        #Extract the predicted bounding box coordinates, objectness scores, and class probabilities from the predictions tensor
+        target_obj = (targets[..., 0] == 1).float()
+        target_noobj = (targets[..., 0] == 0).float()
+        target_xy = targets[..., 1:3]
+        target_wh = targets[..., 3:5]
+        target_cls = targets[..., 5]
 
-        #Calculate the box loss using the mean squared error between the predicted and target bounding box coordinates.
-        #Calculate the objectness loss using the mean squared error between the predicted and target objectness scores.
-        #Calculate the class loss using the cross-entropy loss between the predicted and target class probabilities.
+        with torch.no_grad():
+            iou_pred_with_target = self._calculate_iou(pred_box_cxcywh=predictions[..., 1:5], target_box_cxcywh=targets[..., 1:5])
 
-        #Sum the individual losses (box loss, objectness loss, and class loss) to get the total loss.
+        # calculate loss for oobj, noobj, xy, wh, cls
+        obj_loss = self.obj_loss(pred_obj, iou_pred_with_target) * target_obj
+        obj_loss = obj_loss.sum() / self.batch_size
+
+        noobj_loss = self.obj_loss(pred_obj, pred_obj * 0) * target_noobj
+        noobj_loss = noobj_loss.sum() / self.batch_size
+
+        txty_loss = self.box_loss(pred_xy, target_xy).sum(dim=-1) * target_obj
+        txty_loss = txty_loss.sum() / self.batch_size
+
+        twth_loss = self.box_loss(pred_wh, target_wh).sum(dim=-1) * target_obj
+        twth_loss = twth_loss.sum() / self.batch_size
         
+        cls_loss = self.class_loss(pred_cls, target_cls) * target_obj
+        cls_loss = cls_loss.sum() / self.batch_size
+
+        multipart_loss = self.lambda_obj * obj_loss + noobj_loss + (txty_loss + twth_loss) + cls_loss
+        return [multipart_loss, obj_loss, noobj_loss, txty_loss, twth_loss, cls_loss]
+
+
+
+        
+    def _calculate_iou(self, pred_box_cxcywh, target_box_cxcywh):
+        pred_x1y1x2y2 = self.xywh_to_x1y1x2y2(pred_box_cxcywh)
+        target_x1y1x2y2 = self.xywh_to_x1y1x2y2(target_box_cxcywh)
+
+        inter_x1 = torch.max(pred_x1y1x2y2[..., 0], target_x1y1x2y2[..., 0])
+        inter_y1 = torch.max(pred_x1y1x2y2[..., 1], target_x1y1x2y2[..., 1])
+        inter_x2 = torch.min(pred_x1y1x2y2[..., 2], target_x1y1x2y2[..., 2])
+        inter_y2 = torch.min(pred_x1y1x2y2[..., 3], target_x1y1x2y2[..., 3])
+        
+        inter = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
+
+        pred_area = (pred_x1y1x2y2[..., 2] - pred_x1y1x2y2[..., 0]) * (pred_x1y1x2y2[..., 3] - pred_x1y1x2y2[..., 1])
+        target_area = (target_x1y1x2y2[..., 2] - target_x1y1x2y2[..., 0]) * (target_x1y1x2y2[..., 3] - target_x1y1x2y2[..., 1])
+        union = abs(pred_area) + abs(target_area) - inter
+        inter[inter.gt(0)] = inter[inter.gt(0)] / union[inter.gt(0)] # calculate iou only where intersection is greater than 0
+
+        return inter
+
+
+
+    def xywh_to_x1y1x2y2(self, boxes):
+        # x y and are rel to grid -> recalculate to rel to whole
+        x_rel_to_img = (boxes[..., 0] + self.grid_x.to(self.device)) / self.grid_size
+        y_rel_to_img = (boxes[..., 1] + self.grid_y.to(self.device)) / self.grid_size
+        # w h are refinements of the anchors -> recalculte the whole w h
+        w = torch.exp(boxes[..., 2]) * self.anchors[:, 0].to(self.device) # TODO why this anchor??
+        h = torch.exp(boxes[..., 3]) * self.anchors[:, 1].to(self.device) 
+        # then just get xmin ymin xmax ymax from the above
+        x1 = x_rel_to_img - w/2
+        y1 = y_rel_to_img - h/2
+        x2 = x_rel_to_img + w/2
+        y2 = y_rel_to_img + h/2
+        return torch.stack((x1, y1, x2, y2), dim=-1)
 
     def _build_targets(self, labels):
         targets = torch.stack([self._build_target(label) for label in labels])
